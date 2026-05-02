@@ -3,66 +3,116 @@ import requests
 import pandas as pd
 
 # --- CONFIG ---
-st.set_page_config(page_title="Village Weather Finder", page_icon="🌦️", layout="centered")
+st.set_page_config(page_title="Farmer Weather Analytics", page_icon="🌾", layout="centered")
 
-# --- LOCAL DATABASE ---
+st.title("🌾 Farmer Analytics Dashboard")
+
+# --- PINCODE DB ---
 PINCODE_DB = {
-    "505301": {"lat": 18.7565, "lon": 79.4448, "name": "Ramagundam / Peddapalli"},
-    "505302": {"lat": 18.5000, "lon": 78.9333, "name": "Vemulawada, Rajanna Sircilla"},
-    "524221": {"lat": 14.9565, "lon": 79.5169, "name": "Chakalakonda, Nellore"}
+    "505302": {"lat": 18.5, "lon": 78.9333, "name": "Vemulawada"},
+    "505301": {"lat": 18.7565, "lon": 79.4448, "name": "Ramagundam"},
+    "524221": {"lat": 14.9565, "lon": 79.5169, "name": "Chakalakonda, Nellore"}    
 }
 
-def get_coords_from_pincode(pin):
-    """Fallback: Fetch coordinates for any pincode in India."""
-    url = f"https://nominatim.openstreetmap.org/search?postalcode={pin}&country=India&format=json"
-    headers = {'User-Agent': 'WeatherAppDemo/1.0'}
+# --- FUNCTIONS ---
+def get_historical_weather(lat, lon, start, end):
+    url = "https://archive-api.open-meteo.com/v1/archive"
+
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "start_date": start,
+        "end_date": end,
+        "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum",
+        "timezone": "auto"
+    }
+
     try:
-        response = requests.get(url, headers=headers).json()
-        if response:
-            return {
-                "lat": float(response[0]['lat']),
-                "lon": float(response[0]['lon']),
-                "name": response[0]['display_name'].split(',')[0]
-            }
+        res = requests.get(url, params=params, timeout=10)
+        res.raise_for_status()
+        return res.json()
     except:
         return None
-    return None
 
-def get_weather(lat, lon):
-    """Fetch current weather from Open-Meteo."""
-    url =  f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true"
-    response = requests.get(url)
-    return response.json() if response.status_code == 200 else None
 
-# --- UI ---
-st.title("🌦️ Village Weather Dashboard")
-st.info("Directly updated for **Vemulawada (505302)**.")
-
-pincode = st.text_input("Enter Indian Pincode", value="505302", max_chars=6)
-
-if st.button("Search Weather"):
-    # 1. Check local DB first, then fallback to API lookup
-    location = PINCODE_DB.get(pincode) or get_coords_from_pincode(pincode)
-    
-    if location:
-        data = get_weather(location['lat'], location['lon'])
-        
-        if data:
-            current = data['current_weather']
-            st.success(f"📍 Found: **{location['name']}**")
-            
-            # Display Metrics
-            m1, m2 = st.columns(2)
-            m1.metric("Temperature", f"{current['temperature']}°C")
-            m2.metric("Wind Speed", f"{current['windspeed']} km/h")
-            
-            # Map View
-            st.subheader("Location View")
-            st.map(pd.DataFrame({'lat': [location['lat']], 'lon': [location['lon']]}))
-        else:
-            st.error("Weather data currently unavailable.")
+def crop_advisory(avg_rain, avg_temp):
+    if avg_rain > 8:
+        return "🌾 Suitable for Rice"
+    elif avg_rain > 3:
+        return "🌽 Suitable for Maize / Cotton"
     else:
-        st.error("Pincode not found. Please check the number.")
+        return "🌿 Suitable for Millets / Groundnut"
 
-st.divider()
-st.caption("Using [Open-Meteo](https://open-meteo.com) for weather and [OpenStreetMap](https://www.openstreetmap.org/) for locations.")
+
+def risk_alert(total_rain):
+    if total_rain < 20:
+        return "⚠️ Low rainfall (Drought Risk)"
+    elif total_rain > 200:
+        return "⚠️ Heavy rainfall (Flood Risk)"
+    else:
+        return "✅ Normal conditions"
+
+
+# --- UI INPUT ---
+pincode = st.text_input("Enter Pincode", "505302")
+
+col1, col2 = st.columns(2)
+start_date = col1.date_input("Start Date")
+end_date = col2.date_input("End Date")
+
+# --- ACTION ---
+if st.button("Analyze"):
+    location = PINCODE_DB.get(pincode)
+
+    if not location:
+        st.error("Pincode not found")
+    else:
+        data = get_historical_weather(
+            location['lat'],
+            location['lon'],
+            str(start_date),
+            str(end_date)
+        )
+
+        if data and "daily" in data:
+            df = pd.DataFrame(data["daily"])
+
+            st.success(f"📍 {location['name']}")
+
+            # --- METRICS ---
+            total_rain = df["precipitation_sum"].sum()
+            avg_rain = df["precipitation_sum"].mean()
+            avg_temp = df["temperature_2m_max"].mean()
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Total Rainfall (mm)", round(total_rain, 2))
+            m2.metric("Avg Rain/day", round(avg_rain, 2))
+            m3.metric("Avg Temp (°C)", round(avg_temp, 2))
+
+            st.divider()
+
+            # --- CHART ---
+            st.subheader("📈 Weather Trends")
+
+            st.subheader("📈 Precipitation")
+            df_chart = df.set_index("time")
+            st.line_chart(df_chart[[ "precipitation_sum"]])
+
+            st.subheader("📈 Temparature")
+            df_chart = df.set_index("time")
+            st.line_chart(df_chart[[ "temperature_2m_max"]])
+
+            # --- ADVISORY ---
+            st.subheader("🌱 Crop Advisory")
+            st.info(crop_advisory(avg_rain, avg_temp))
+
+            # --- RISK ---
+            st.subheader("⚠️ Risk Analysis")
+            st.warning(risk_alert(avg_rain))
+
+            # --- DATA TABLE ---
+            with st.expander("View Raw Data"):
+                st.dataframe(df)
+
+        else:
+            st.error("Failed to fetch data")
